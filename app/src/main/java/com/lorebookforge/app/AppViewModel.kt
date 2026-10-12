@@ -1,0 +1,248 @@
+package com.lorebookforge.app
+
+import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.lorebookforge.app.data.FileRepository
+import com.lorebookforge.app.data.ParsedBook
+import com.lorebookforge.app.data.RecentFilesStore
+import com.lorebookforge.app.model.Entry
+import com.lorebookforge.app.model.RecentFile
+import com.lorebookforge.app.model.SwitchDef
+import com.lorebookforge.app.model.SwitchType
+import com.lorebookforge.app.model.defaultSwitches
+import com.lorebookforge.app.model.defaultValueFor
+import com.lorebookforge.app.model.defaultValuesForSwitches
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.util.UUID
+
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+
+    // ---- library ----
+    var recentFiles by mutableStateOf<List<RecentFile>>(emptyList())
+        private set
+
+    // ---- current book ----
+    var bookName by mutableStateOf("")
+        private set
+    var displayFieldId by mutableStateOf("comment")
+        private set
+    var subtitleFieldId by mutableStateOf<String?>("key")
+        private set
+    var currentUri by mutableStateOf<Uri?>(null)
+        private set
+
+    val switches = mutableStateListOf<SwitchDef>()
+    val entries = mutableStateListOf<Entry>()
+
+    // ---- current entry ----
+    var currentEntryId by mutableStateOf<String?>(null)
+        private set
+
+    private var saveJob: Job? = null
+
+    fun refreshRecents() {
+        recentFiles = RecentFilesStore.load(getApplication())
+    }
+
+    fun openBook(uri: Uri) {
+        val context = getApplication<Application>()
+        grantPersistablePermission(uri)
+        val parsed = FileRepository.read(context, uri)
+        loadParsedIntoState(parsed)
+        currentUri = uri
+        RecentFilesStore.touch(context, uri.toString(), parsed.name)
+        refreshRecents()
+    }
+
+    fun createBook(uri: Uri, name: String) {
+        val context = getApplication<Application>()
+        grantPersistablePermission(uri)
+        bookName = name
+        displayFieldId = "comment"
+        subtitleFieldId = "key"
+        switches.clear()
+        switches.addAll(defaultSwitches())
+        entries.clear()
+        currentUri = uri
+        persistNow()
+        RecentFilesStore.touch(context, uri.toString(), name)
+        refreshRecents()
+    }
+
+    private fun loadParsedIntoState(parsed: ParsedBook) {
+        bookName = parsed.name
+        displayFieldId = parsed.displayFieldId
+        subtitleFieldId = parsed.subtitleFieldId
+        switches.clear()
+        switches.addAll(parsed.switches)
+        entries.clear()
+        parsed.entries.forEach { pe ->
+            val map = mutableStateMapOf<String, Any?>()
+            map.putAll(pe.values)
+            entries.add(Entry(pe.id, map))
+        }
+    }
+
+    fun closeBook() {
+        persistNow()
+        currentUri = null
+        currentEntryId = null
+        switches.clear()
+        entries.clear()
+        bookName = ""
+    }
+
+    fun removeRecent(uri: String) {
+        RecentFilesStore.remove(getApplication(), uri)
+        refreshRecents()
+    }
+
+    fun openEntry(id: String) { currentEntryId = id }
+    fun closeEntry() { currentEntryId = null }
+
+    fun entryById(id: String): Entry? = entries.find { it.id == id }
+
+    fun renameBook(newName: String) {
+        bookName = newName
+        scheduleSave()
+    }
+
+    fun addEntry(): String {
+        val id = UUID.randomUUID().toString().take(8)
+        val map = mutableStateMapOf<String, Any?>()
+        map.putAll(defaultValuesForSwitches(switches))
+        entries.add(Entry(id, map))
+        scheduleSave()
+        return id
+    }
+
+    fun deleteEntry(id: String) {
+        entries.removeAll { it.id == id }
+        scheduleSave()
+    }
+
+    fun updateEntryValue(entryId: String, switchId: String, value: Any?) {
+        entryById(entryId)?.values?.set(switchId, value)
+        scheduleSave()
+    }
+
+    fun removeSwitchFromEntry(entryId: String, switchId: String) {
+        entryById(entryId)?.values?.remove(switchId)
+        scheduleSave()
+    }
+
+    fun addSwitchToEntry(entryId: String, switchId: String) {
+        val entry = entryById(entryId) ?: return
+        val def = switches.find { it.id == switchId } ?: return
+        if (!entry.values.containsKey(switchId)) {
+            entry.values[switchId] = defaultValueFor(def.type, def.id)
+        }
+        scheduleSave()
+    }
+
+    /** Adds a brand-new switch to the book's registry, optionally turning
+     *  it on for one entry right away, and returns its generated id. */
+    fun addNewSwitch(label: String, type: SwitchType, addToEntryId: String? = null): String {
+        var id = slugify(label)
+        if (id.isEmpty()) id = "switch"
+        var unique = id
+        var n = 1
+        while (switches.any { it.id == unique }) {
+            n++
+            unique = "$id$n"
+        }
+        switches.add(SwitchDef(unique, label, type))
+        if (addToEntryId != null) {
+            addSwitchToEntry(addToEntryId, unique)
+        } else {
+            scheduleSave()
+        }
+        return unique
+    }
+
+    fun renameSwitch(switchId: String, newLabel: String) {
+        val idx = switches.indexOfFirst { it.id == switchId }
+        if (idx == -1) return
+        switches[idx] = switches[idx].copy(label = newLabel)
+        scheduleSave()
+    }
+
+    fun changeSwitchType(switchId: String, newType: SwitchType) {
+        val idx = switches.indexOfFirst { it.id == switchId }
+        if (idx == -1) return
+        switches[idx] = switches[idx].copy(type = newType)
+        entries.forEach { entry ->
+            if (entry.values.containsKey(switchId)) {
+                entry.values[switchId] = defaultValueFor(newType, switchId)
+            }
+        }
+        scheduleSave()
+    }
+
+    fun deleteSwitchGlobally(switchId: String) {
+        switches.removeAll { it.id == switchId }
+        entries.forEach { it.values.remove(switchId) }
+        if (displayFieldId == switchId) {
+            displayFieldId = switches.firstOrNull { it.type == SwitchType.TEXT }?.id ?: ""
+        }
+        if (subtitleFieldId == switchId) {
+            subtitleFieldId = switches.firstOrNull { it.type == SwitchType.TEXT && it.id != displayFieldId }?.id
+        }
+        scheduleSave()
+    }
+
+    fun setDisplayField(id: String) {
+        displayFieldId = id
+        scheduleSave()
+    }
+
+    fun setSubtitleField(id: String?) {
+        subtitleFieldId = id
+        scheduleSave()
+    }
+
+    private fun grantPersistablePermission(uri: Uri) {
+        try {
+            getApplication<Application>().contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (e: SecurityException) {
+            // Permission may already be held, or the provider doesn't grant
+            // persistable access; either way, carry on with what we have.
+        }
+    }
+
+    private fun slugify(s: String): String {
+        return s.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+    }
+
+    private fun scheduleSave() {
+        saveJob?.cancel()
+        saveJob = viewModelScope.launch {
+            delay(400)
+            persistNow()
+        }
+    }
+
+    fun persistNow() {
+        val uri = currentUri ?: return
+        try {
+            FileRepository.write(
+                getApplication(), uri, bookName, switches.toList(), entries.toList(), displayFieldId, subtitleFieldId
+            )
+        } catch (e: Exception) {
+            // Best-effort autosave; a transient write failure shouldn't crash the editor.
+        }
+    }
+}
