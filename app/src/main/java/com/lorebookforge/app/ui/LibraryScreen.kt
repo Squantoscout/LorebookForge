@@ -37,8 +37,9 @@ fun LibraryScreen(viewModel: AppViewModel, onOpenBook: () -> Unit) {
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri: Uri? ->
         if (uri != null && pendingNewName.isNotBlank()) {
-            viewModel.createBook(uri, pendingNewName)
-            onOpenBook()
+            viewModel.createBook(uri, pendingNewName) { success ->
+                if (success) onOpenBook()
+            }
         }
     }
 
@@ -46,8 +47,9 @@ fun LibraryScreen(viewModel: AppViewModel, onOpenBook: () -> Unit) {
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            viewModel.openBook(uri)
-            onOpenBook()
+            viewModel.openBook(uri) { success ->
+                if (success) onOpenBook()
+            }
         }
     }
 
@@ -79,11 +81,8 @@ fun LibraryScreen(viewModel: AppViewModel, onOpenBook: () -> Unit) {
                     RecentFileRow(
                         recent = recent,
                         onClick = {
-                            try {
-                                viewModel.openBook(Uri.parse(recent.uri))
-                                onOpenBook()
-                            } catch (e: Exception) {
-                                viewModel.removeRecent(recent.uri)
+                            viewModel.openBook(Uri.parse(recent.uri)) { success ->
+                                if (success) onOpenBook()
                             }
                         },
                         onRemove = { viewModel.removeRecent(recent.uri) }

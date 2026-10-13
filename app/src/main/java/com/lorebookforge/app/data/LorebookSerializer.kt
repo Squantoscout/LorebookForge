@@ -3,6 +3,7 @@ package com.lorebookforge.app.data
 import com.lorebookforge.app.model.Entry
 import com.lorebookforge.app.model.SwitchDef
 import com.lorebookforge.app.model.SwitchType
+import com.lorebookforge.app.model.defaultSwitches
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -72,6 +73,13 @@ object LorebookSerializer {
     }
 
     fun fromJson(text: String): ParsedBook {
+        // A file picked or created through the system file UI can briefly
+        // be empty (zero bytes) before anything has been written to it.
+        // Treat that as a fresh, empty book instead of a parse error.
+        if (text.isBlank()) {
+            return ParsedBook("Untitled Lorebook", defaultSwitches(), emptyList(), "comment", "key")
+        }
+
         val root = JSONObject(text)
         val name = root.optString("name", "Untitled Lorebook")
 

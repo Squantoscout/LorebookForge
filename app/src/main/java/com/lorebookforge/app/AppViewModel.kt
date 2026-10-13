@@ -20,9 +20,11 @@ import com.lorebookforge.app.model.SwitchType
 import com.lorebookforge.app.model.defaultSwitches
 import com.lorebookforge.app.model.defaultValueFor
 import com.lorebookforge.app.model.defaultValuesForSwitches
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -48,35 +50,68 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var currentEntryId by mutableStateOf<String?>(null)
         private set
 
+    // ---- errors, surfaced as a snackbar instead of crashing ----
+    var lastError by mutableStateOf<String?>(null)
+        private set
+
+    fun clearError() {
+        lastError = null
+    }
+
     private var saveJob: Job? = null
 
     fun refreshRecents() {
         recentFiles = RecentFilesStore.load(getApplication())
     }
 
-    fun openBook(uri: Uri) {
-        val context = getApplication<Application>()
-        grantPersistablePermission(uri)
-        val parsed = FileRepository.read(context, uri)
-        loadParsedIntoState(parsed)
-        currentUri = uri
-        RecentFilesStore.touch(context, uri.toString(), parsed.name)
-        refreshRecents()
+    /** Opens a book from disk. [onDone] fires with true on success, false on
+     *  failure (in which case [lastError] is set and nothing navigates). */
+    fun openBook(uri: Uri, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                val context = getApplication<Application>()
+                grantPersistablePermission(uri)
+                val parsed = withContext(Dispatchers.IO) { FileRepository.read(context, uri) }
+                loadParsedIntoState(parsed)
+                currentUri = uri
+                RecentFilesStore.touch(context, uri.toString(), parsed.name)
+                refreshRecents()
+                onDone(true)
+            } catch (e: Exception) {
+                lastError = "Couldn't open that file: ${describeError(e)}"
+                onDone(false)
+            }
+        }
     }
 
-    fun createBook(uri: Uri, name: String) {
-        val context = getApplication<Application>()
-        grantPersistablePermission(uri)
-        bookName = name
-        displayFieldId = "comment"
-        subtitleFieldId = "key"
-        switches.clear()
-        switches.addAll(defaultSwitches())
-        entries.clear()
-        currentUri = uri
-        persistNow()
-        RecentFilesStore.touch(context, uri.toString(), name)
-        refreshRecents()
+    /** Creates a brand-new book at [uri]. [onDone] fires with true on
+     *  success, false on failure (in which case [lastError] is set). */
+    fun createBook(uri: Uri, name: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                val context = getApplication<Application>()
+                grantPersistablePermission(uri)
+                bookName = name
+                displayFieldId = "comment"
+                subtitleFieldId = "key"
+                switches.clear()
+                switches.addAll(defaultSwitches())
+                entries.clear()
+                currentUri = uri
+                withContext(Dispatchers.IO) {
+                    FileRepository.write(
+                        context, uri, bookName, switches.toList(), entries.toList(), displayFieldId, subtitleFieldId
+                    )
+                }
+                RecentFilesStore.touch(context, uri.toString(), name)
+                refreshRecents()
+                onDone(true)
+            } catch (e: Exception) {
+                lastError = "Couldn't create that file: ${describeError(e)}"
+                currentUri = null
+                onDone(false)
+            }
+        }
     }
 
     private fun loadParsedIntoState(parsed: ParsedBook) {
@@ -227,6 +262,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return s.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
     }
 
+    private fun describeError(e: Exception): String {
+        return e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+    }
+
     private fun scheduleSave() {
         saveJob?.cancel()
         saveJob = viewModelScope.launch {
@@ -235,14 +274,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Fire-and-forget autosave: snapshots current state on the calling
+     *  thread, then writes it off the main thread. Failures are surfaced
+     *  via [lastError] rather than crashing the editor. */
     fun persistNow() {
         val uri = currentUri ?: return
-        try {
-            FileRepository.write(
-                getApplication(), uri, bookName, switches.toList(), entries.toList(), displayFieldId, subtitleFieldId
-            )
-        } catch (e: Exception) {
-            // Best-effort autosave; a transient write failure shouldn't crash the editor.
+        val name = bookName
+        val sw = switches.toList()
+        val en = entries.toList()
+        val df = displayFieldId
+        val sf = subtitleFieldId
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                FileRepository.write(getApplication(), uri, name, sw, en, df, sf)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    lastError = "Couldn't save: ${describeError(e)}"
+                }
+            }
         }
     }
 }
