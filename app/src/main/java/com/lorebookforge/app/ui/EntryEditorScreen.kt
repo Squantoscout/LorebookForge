@@ -2,6 +2,7 @@ package com.lorebookforge.app.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -13,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.lorebookforge.app.AppViewModel
@@ -152,6 +154,9 @@ private fun SwitchFieldRow(
                 )
             }
         }
+        SwitchType.TAGS -> {
+            TagsFieldRow(label = label, value = value, onValueChange = onValueChange, onRemove = onRemove)
+        }
     }
 }
 
@@ -166,6 +171,95 @@ private fun FieldHeader(label: String, onRemove: () -> Unit) {
         IconButton(onClick = onRemove) {
             Icon(Icons.Filled.Close, contentDescription = "Remove $label from this entry")
         }
+    }
+}
+
+/** A switch whose value is a short list of words or phrases - entry keys,
+ *  typically. Stored as the same comma-joined string a TEXT switch would
+ *  use (so the file format is unchanged), but edited one item at a time:
+ *  type a word, press Enter or type a comma, and it becomes a chip you can
+ *  tap to remove instead of punctuation you have to get right. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TagsFieldRow(
+    label: String,
+    value: Any?,
+    onValueChange: (Any?) -> Unit,
+    onRemove: () -> Unit
+) {
+    val initial = (value as? String ?: "")
+    val tags = remember(key1 = Unit) {
+        mutableStateListOf<String>().apply {
+            addAll(initial.split(",").map { it.trim() }.filter { it.isNotEmpty() })
+        }
+    }
+    var draft by remember { mutableStateOf("") }
+
+    fun syncOut() {
+        onValueChange(tags.joinToString(", "))
+    }
+
+    fun commitDraft() {
+        val t = draft.trim()
+        draft = ""
+        if (t.isNotEmpty() && !tags.contains(t)) {
+            tags.add(t)
+            syncOut()
+        }
+    }
+
+    Column {
+        FieldHeader(label, onRemove)
+        if (tags.isNotEmpty()) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            ) {
+                tags.forEach { tag ->
+                    InputChip(
+                        selected = false,
+                        onClick = {
+                            tags.remove(tag)
+                            syncOut()
+                        },
+                        label = { Text(tag) },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Remove \"$tag\"",
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    )
+                }
+            }
+        }
+        OutlinedTextField(
+            value = draft,
+            onValueChange = { text ->
+                // Typing a comma commits the word before it as a chip,
+                // same as pressing Enter.
+                if (text.contains(",")) {
+                    val parts = text.split(",")
+                    parts.dropLast(1).forEach { part ->
+                        val t = part.trim()
+                        if (t.isNotEmpty() && !tags.contains(t)) tags.add(t)
+                    }
+                    draft = parts.last()
+                    syncOut()
+                } else {
+                    draft = text
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            placeholder = { Text("Type a word, then Enter or a comma") },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { commitDraft() })
+        )
     }
 }
 

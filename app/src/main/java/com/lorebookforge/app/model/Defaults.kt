@@ -4,8 +4,8 @@ package com.lorebookforge.app.model
  *  be freely renamed, retyped, or deleted afterward — nothing here is fixed. */
 fun defaultSwitches(): List<SwitchDef> = listOf(
     SwitchDef("comment", "Title / Comment", SwitchType.TEXT),
-    SwitchDef("key", "Primary Keys", SwitchType.TEXT),
-    SwitchDef("keysecondary", "Secondary Keys", SwitchType.TEXT),
+    SwitchDef("key", "Primary Keys", SwitchType.TAGS),
+    SwitchDef("keysecondary", "Secondary Keys", SwitchType.TAGS),
     SwitchDef("content", "Content", SwitchType.TEXT),
     SwitchDef("enabled", "Enabled", SwitchType.TOGGLE),
     SwitchDef("constant", "Constant", SwitchType.TOGGLE),
@@ -18,6 +18,7 @@ fun defaultSwitches(): List<SwitchDef> = listOf(
 
 fun defaultValueFor(type: SwitchType, switchId: String): Any? = when (type) {
     SwitchType.TEXT -> ""
+    SwitchType.TAGS -> ""
     SwitchType.NUMBER -> 0.0
     SwitchType.TOGGLE -> switchId == "enabled"
 }
