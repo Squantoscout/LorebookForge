@@ -1,5 +1,6 @@
 package com.lorebookforge.app.ui
 
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
@@ -10,13 +11,18 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.lorebookforge.app.AppViewModel
 import com.lorebookforge.app.model.SwitchType
 
@@ -36,6 +42,16 @@ fun EntryEditorScreen(viewModel: AppViewModel, onBack: () -> Unit) {
         onBack()
         return
     }
+
+    // Drag-to-reorder state for the fields below. Dragging one changes the
+    // whole book's switch order (reflected in every other entry and, on
+    // the next save, the field order in the file), not just this entry's
+    // display order - but the threshold logic compares against only the
+    // switches visible here (the ones turned on for this entry), since
+    // that's the order the person actually sees and drags.
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    var dragOffsetPx by remember { mutableStateOf(0f) }
+    val rowHeights = remember { mutableStateMapOf<String, Int>() }
 
     Scaffold(
         topBar = {
@@ -64,16 +80,74 @@ fun EntryEditorScreen(viewModel: AppViewModel, onBack: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
-            viewModel.switches.forEach { sw ->
-                if (entry.values.containsKey(sw.id)) {
-                    SwitchFieldRow(
-                        label = sw.label,
-                        type = sw.type,
-                        value = entry.values[sw.id],
-                        onValueChange = { viewModel.updateEntryValue(entryId, sw.id, it) },
-                        onRemove = { viewModel.removeSwitchFromEntry(entryId, sw.id) }
-                    )
-                    Spacer(Modifier.height(14.dp))
+            val visibleSwitches = viewModel.switches.filter { entry.values.containsKey(it.id) }
+            visibleSwitches.forEach { sw ->
+                val isDragging = draggingId == sw.id
+                Row(
+                    verticalAlignment = Alignment.Top,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onGloballyPositioned { coords -> rowHeights[sw.id] = coords.size.height }
+                        .graphicsLayer { translationY = if (isDragging) dragOffsetPx else 0f }
+                        .zIndex(if (isDragging) 1f else 0f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 2.dp, end = 4.dp)
+                            .size(40.dp)
+                            .pointerInput(sw.id) {
+                                detectDragGestures(
+                                    onDragStart = {
+                                        draggingId = sw.id
+                                        dragOffsetPx = 0f
+                                    },
+                                    onDragEnd = {
+                                        draggingId = null
+                                        dragOffsetPx = 0f
+                                    },
+                                    onDragCancel = {
+                                        draggingId = null
+                                        dragOffsetPx = 0f
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        dragOffsetPx += dragAmount.y
+                                        val myHeight = rowHeights[sw.id] ?: return@detectDragGestures
+                                        // Recomputed fresh on every call (rather than
+                                        // captured once) so a reorder that happens
+                                        // mid-gesture is reflected immediately.
+                                        val visible = viewModel.switches.filter { entry.values.containsKey(it.id) }
+                                        val currentIndex = visible.indexOfFirst { it.id == sw.id }
+                                        if (currentIndex == -1) return@detectDragGestures
+                                        if (dragOffsetPx > myHeight / 2f && currentIndex < visible.lastIndex) {
+                                            val neighbor = visible[currentIndex + 1]
+                                            val neighborHeight = rowHeights[neighbor.id] ?: myHeight
+                                            val afterNeighborId = visible.getOrNull(currentIndex + 2)?.id
+                                            viewModel.moveSwitchBefore(sw.id, afterNeighborId)
+                                            dragOffsetPx -= neighborHeight
+                                        } else if (dragOffsetPx < -myHeight / 2f && currentIndex > 0) {
+                                            val neighbor = visible[currentIndex - 1]
+                                            val neighborHeight = rowHeights[neighbor.id] ?: myHeight
+                                            viewModel.moveSwitchBefore(sw.id, neighbor.id)
+                                            dragOffsetPx += neighborHeight
+                                        }
+                                    }
+                                )
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Filled.DragHandle, contentDescription = "Drag to reorder \"${sw.label}\"")
+                    }
+                    Column(Modifier.weight(1f)) {
+                        SwitchFieldRow(
+                            label = sw.label,
+                            type = sw.type,
+                            value = entry.values[sw.id],
+                            onValueChange = { viewModel.updateEntryValue(entryId, sw.id, it) },
+                            onRemove = { viewModel.removeSwitchFromEntry(entryId, sw.id) }
+                        )
+                        Spacer(Modifier.height(14.dp))
+                    }
                 }
             }
             Spacer(Modifier.height(72.dp))

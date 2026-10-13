@@ -222,13 +222,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return unique
     }
 
-    /** Moves a switch from one position in the registry to another. Switch
+    /** Moves a switch to sit right before [beforeId] in the registry (or to
+     *  the end, if [beforeId] is null). Anchoring the move to a neighbor's
+     *  id, rather than a plain index, keeps it correct even when the
+     *  caller is dragging within a filtered view - the entry editor only
+     *  shows the switches turned on for that one entry, so "the next one
+     *  visible" isn't necessarily "the next one in the registry". Switch
      *  order is also field order in the file, so this is both a display
      *  preference and, on the next save, the order the JSON is written in. */
-    fun moveSwitch(from: Int, to: Int) {
-        if (from == to || from !in switches.indices || to !in switches.indices) return
-        val item = switches.removeAt(from)
-        switches.add(to, item)
+    fun moveSwitchBefore(movedId: String, beforeId: String?) {
+        val moved = switches.find { it.id == movedId } ?: return
+        switches.remove(moved)
+        val insertAt = beforeId
+            ?.let { id -> switches.indexOfFirst { it.id == id } }
+            ?.takeIf { it != -1 }
+            ?: switches.size
+        switches.add(insertAt, moved)
         scheduleSave()
     }
 
