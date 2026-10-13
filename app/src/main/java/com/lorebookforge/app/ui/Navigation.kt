@@ -38,8 +38,16 @@ fun AppNavHost(viewModel: AppViewModel) {
                 BookScreen(
                     viewModel = viewModel,
                     onBack = {
-                        viewModel.closeBook()
-                        navController.popBackStack()
+                        // Only pop while "book" is still the current
+                        // destination. This makes a duplicate call to
+                        // onBack() (which can happen if anything ever
+                        // reacts to closeBook()'s state change the way
+                        // the entry screen does) a harmless no-op instead
+                        // of popping an extra screen off the stack.
+                        if (navController.currentDestination?.route == "book") {
+                            viewModel.closeBook()
+                            navController.popBackStack()
+                        }
                     },
                     onOpenEntry = { id ->
                         viewModel.openEntry(id)
@@ -51,8 +59,20 @@ fun AppNavHost(viewModel: AppViewModel) {
                 EntryEditorScreen(
                     viewModel = viewModel,
                     onBack = {
-                        viewModel.closeEntry()
-                        navController.popBackStack()
+                        // EntryEditorScreen falls back to calling onBack()
+                        // on its own whenever its entry becomes unavailable
+                        // (deleted, or its id cleared on the way out) - and
+                        // that can happen right after the user's own tap
+                        // already triggered this same callback once. Without
+                        // this guard, both calls pop the stack, which blows
+                        // straight through "book" and leaves nothing
+                        // composed (the blank-screen bug). Only popping
+                        // while "entry" is still the current destination
+                        // makes the second call a harmless no-op.
+                        if (navController.currentDestination?.route == "entry") {
+                            viewModel.closeEntry()
+                            navController.popBackStack()
+                        }
                     }
                 )
             }
