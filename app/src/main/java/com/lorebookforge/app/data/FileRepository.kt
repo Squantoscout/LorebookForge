@@ -23,13 +23,10 @@ object FileRepository {
     fun write(
         context: Context,
         uri: Uri,
-        name: String,
         switches: List<SwitchDef>,
-        entries: List<Entry>,
-        displayFieldId: String,
-        subtitleFieldId: String?
+        entries: List<Entry>
     ) {
-        val json = LorebookSerializer.toJson(name, switches, entries, displayFieldId, subtitleFieldId)
+        val json = LorebookSerializer.toJson(switches, entries)
         context.contentResolver.openOutputStream(uri, "wt")?.use { stream ->
             stream.write(json.toByteArray())
         } ?: throw IllegalStateException("Could not open file for writing")

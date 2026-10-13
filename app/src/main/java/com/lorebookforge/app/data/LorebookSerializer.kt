@@ -1,75 +1,76 @@
 package com.lorebookforge.app.data
 
+import com.lorebookforge.app.model.AUTO_MANAGED_FIELD_IDS
 import com.lorebookforge.app.model.Entry
 import com.lorebookforge.app.model.SwitchDef
 import com.lorebookforge.app.model.SwitchType
 import com.lorebookforge.app.model.defaultSwitches
+import com.lorebookforge.app.model.labelForFieldId
 import org.json.JSONArray
 import org.json.JSONObject
 
 /** A parsed entry before it's wrapped into a live, observable [Entry]. */
 data class ParsedEntry(val id: String, val values: Map<String, Any?>)
 
-/** A whole lorebook file, freshly parsed from disk. */
+/** A whole lorebook file, freshly parsed from disk. There's no separate
+ *  "name" or switch registry here - Lorebook Forge's own bookkeeping lives
+ *  outside the file (see [RecentFilesStore]); what the switches even are
+ *  is inferred from whichever fields the entries use. */
 data class ParsedBook(
-    val name: String,
     val switches: List<SwitchDef>,
-    val entries: List<ParsedEntry>,
-    val displayFieldId: String,
-    val subtitleFieldId: String?
+    val entries: List<ParsedEntry>
 )
 
 /**
- * Reads and writes the lorebook file format: every switch a book uses is
- * declared by name and type in a top-level "switches" array, so the file
- * is self-describing — it carries its own schema instead of assuming a
- * fixed one, which is what lets switches be freely renamed per book.
+ * Reads and writes a lorebook in the ordinary shape most lorebook tools
+ * (e.g. SillyTavern) expect: a top-level "entries" object keyed by index,
+ * with each entry's own fields - key, comment, content, and so on - sitting
+ * directly on it, nothing else at the top level. Lorebook Forge's switches
+ * are just whichever of those fields happen to be present; the switch
+ * registry itself is never written to the file, so what comes out the
+ * other end is a completely ordinary lorebook JSON, usable anywhere.
  */
 object LorebookSerializer {
 
-    fun toJson(
-        name: String,
-        switches: List<SwitchDef>,
-        entries: List<Entry>,
-        displayFieldId: String,
-        subtitleFieldId: String?
-    ): String {
-        val root = JSONObject()
-        root.put("name", name)
-        root.put("displayFieldId", displayFieldId)
-        root.put("subtitleFieldId", subtitleFieldId ?: JSONObject.NULL)
-
-        val switchesArr = JSONArray()
-        switches.forEach { sw ->
+    fun toJson(switches: List<SwitchDef>, entries: List<Entry>): String {
+        val typeById = switches.associate { it.id to it.type }
+        val entriesObj = JSONObject()
+        entries.forEachIndexed { index, entry ->
             val o = JSONObject()
-            o.put("id", sw.id)
-            o.put("label", sw.label)
-            o.put("type", sw.type.name.lowercase())
-            switchesArr.put(o)
-        }
-        root.put("switches", switchesArr)
-
-        val entriesArr = JSONArray()
-        entries.forEach { entry ->
-            val o = JSONObject()
-            o.put("id", entry.id)
-            val valuesObj = JSONObject()
             entry.values.forEach { (k, v) ->
-                when (v) {
-                    null -> valuesObj.put(k, JSONObject.NULL)
-                    is Boolean -> valuesObj.put(k, v)
-                    is Double -> valuesObj.put(k, v)
-                    is Int -> valuesObj.put(k, v)
-                    is String -> valuesObj.put(k, v)
-                    else -> valuesObj.put(k, v.toString())
+                if (k !in AUTO_MANAGED_FIELD_IDS) {
+                    putValue(o, k, v, typeById[k])
                 }
             }
-            o.put("values", valuesObj)
-            entriesArr.put(o)
+            // The app keeps these in lockstep with the entry's position,
+            // rather than letting them drift from hand-editing or reorders.
+            o.put("uid", index)
+            o.put("displayIndex", index)
+            entriesObj.put(index.toString(), o)
         }
-        root.put("entries", entriesArr)
-
+        val root = JSONObject()
+        root.put("entries", entriesObj)
         return root.toString(2)
+    }
+
+    private fun putValue(o: JSONObject, key: String, value: Any?, type: SwitchType?) {
+        when {
+            value == null -> o.put(key, JSONObject.NULL)
+            type == SwitchType.TAGS && value is String -> {
+                // A Tags switch is held internally as a comma-joined
+                // string (so it edits the same way a Text field would);
+                // written out as a real JSON array, same as any ordinary
+                // lorebook's "key"/"keysecondary".
+                val arr = JSONArray()
+                value.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { arr.put(it) }
+                o.put(key, arr)
+            }
+            value is Boolean -> o.put(key, value)
+            value is Double -> o.put(key, value)
+            value is Int -> o.put(key, value)
+            value is String -> o.put(key, value)
+            else -> o.put(key, value.toString())
+        }
     }
 
     fun fromJson(text: String): ParsedBook {
@@ -77,54 +78,94 @@ object LorebookSerializer {
         // be empty (zero bytes) before anything has been written to it.
         // Treat that as a fresh, empty book instead of a parse error.
         if (text.isBlank()) {
-            return ParsedBook("Untitled Lorebook", defaultSwitches(), emptyList(), "comment", "key")
+            return ParsedBook(defaultSwitches(), emptyList())
         }
 
         val root = JSONObject(text)
-        val name = root.optString("name", "Untitled Lorebook")
+        val entriesNode = root.opt("entries")
 
-        val switches = mutableListOf<SwitchDef>()
-        val switchesArr = root.optJSONArray("switches") ?: JSONArray()
-        for (i in 0 until switchesArr.length()) {
-            val o = switchesArr.getJSONObject(i)
-            val type = when (o.optString("type", "text")) {
-                "toggle" -> SwitchType.TOGGLE
-                "number" -> SwitchType.NUMBER
-                else -> SwitchType.TEXT
-            }
-            switches.add(SwitchDef(o.getString("id"), o.optString("label", o.getString("id")), type))
-        }
-
-        val entries = mutableListOf<ParsedEntry>()
-        val entriesArr = root.optJSONArray("entries") ?: JSONArray()
-        for (i in 0 until entriesArr.length()) {
-            val o = entriesArr.getJSONObject(i)
-            val id = o.optString("id", i.toString())
-            val values = mutableMapOf<String, Any?>()
-            val valuesObj = o.optJSONObject("values") ?: JSONObject()
-            val keyIter = valuesObj.keys()
-            while (keyIter.hasNext()) {
-                val k = keyIter.next()
-                val raw = valuesObj.get(k)
-                values[k] = when (raw) {
-                    JSONObject.NULL -> null
-                    is Boolean -> raw
-                    is Int -> raw.toDouble()
-                    is Double -> raw
-                    is String -> raw
-                    else -> raw.toString()
+        // Collect (object key, entry object) rows in file order, whether
+        // "entries" is an object keyed by index (the ordinary shape) or,
+        // just in case, a plain array.
+        val rows = mutableListOf<Pair<String, JSONObject>>()
+        when (entriesNode) {
+            is JSONObject -> {
+                val ids = mutableListOf<String>()
+                val keyIter = entriesNode.keys()
+                while (keyIter.hasNext()) ids.add(keyIter.next())
+                // Numeric-looking keys sort numerically, so entries come
+                // back in the order a lorebook tool would show them rather
+                // than JSON object string-key order ("10" before "2").
+                ids.sortedBy { it.toIntOrNull() ?: Int.MAX_VALUE }.forEach { id ->
+                    rows.add(id to entriesNode.getJSONObject(id))
                 }
             }
-            entries.add(ParsedEntry(id, values))
+            is JSONArray -> {
+                for (i in 0 until entriesNode.length()) {
+                    rows.add(i.toString() to entriesNode.getJSONObject(i))
+                }
+            }
+            else -> {}
         }
 
-        val displayFieldId = root.optString("displayFieldId", "comment")
-        val subtitleFieldId = if (root.isNull("subtitleFieldId")) {
-            null
+        // Infer the switch registry from whichever fields the entries
+        // actually use - the file carries no separate schema of its own.
+        // A field's type comes from the first entry that has a non-null
+        // value for it; a field that's null on every entry falls back to
+        // Text. Order follows first appearance across the entries.
+        val typeById = LinkedHashMap<String, SwitchType?>()
+        rows.forEach { (_, o) ->
+            val keyIter = o.keys()
+            while (keyIter.hasNext()) {
+                val k = keyIter.next()
+                if (k in AUTO_MANAGED_FIELD_IDS) continue
+                if (!typeById.containsKey(k)) typeById[k] = null
+                if (typeById[k] == null) {
+                    typeById[k] = inferType(o.get(k))
+                }
+            }
+        }
+        val switches = if (typeById.isEmpty()) {
+            defaultSwitches()
         } else {
-            root.optString("subtitleFieldId", "key").ifEmpty { null }
+            typeById.map { (id, type) -> SwitchDef(id, labelForFieldId(id), type ?: SwitchType.TEXT) }
         }
 
-        return ParsedBook(name, switches, entries, displayFieldId, subtitleFieldId)
+        val entries = rows.map { (idxKey, o) ->
+            val values = mutableMapOf<String, Any?>()
+            val keyIter = o.keys()
+            while (keyIter.hasNext()) {
+                val k = keyIter.next()
+                if (k in AUTO_MANAGED_FIELD_IDS) continue
+                values[k] = readValue(o.get(k))
+            }
+            ParsedEntry(idxKey, values)
+        }
+
+        return ParsedBook(switches, entries)
+    }
+
+    private fun inferType(raw: Any?): SwitchType? = when (raw) {
+        JSONObject.NULL, null -> null
+        is Boolean -> SwitchType.TOGGLE
+        is JSONArray -> SwitchType.TAGS
+        is Int, is Long, is Double -> SwitchType.NUMBER
+        is String -> SwitchType.TEXT
+        else -> null
+    }
+
+    private fun readValue(raw: Any?): Any? = when (raw) {
+        JSONObject.NULL -> null
+        is Boolean -> raw
+        is Int -> raw.toDouble()
+        is Long -> raw.toDouble()
+        is Double -> raw
+        is String -> raw
+        is JSONArray -> {
+            val items = mutableListOf<String>()
+            for (i in 0 until raw.length()) items.add(raw.get(i).toString())
+            items.joinToString(", ")
+        }
+        else -> raw.toString()
     }
 }

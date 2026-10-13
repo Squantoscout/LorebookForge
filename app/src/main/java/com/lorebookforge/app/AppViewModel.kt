@@ -1,6 +1,7 @@
 package com.lorebookforge.app
 
 import android.app.Application
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.runtime.getValue
@@ -34,6 +35,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     // ---- current book ----
+    // bookName/displayFieldId/subtitleFieldId are Lorebook Forge's own
+    // bookkeeping - none of it lives in the JSON file itself (see
+    // LorebookSerializer), so it's persisted in RecentFilesStore instead.
     var bookName by mutableStateOf("")
         private set
     var displayFieldId by mutableStateOf("comment")
@@ -72,9 +76,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val context = getApplication<Application>()
                 grantPersistablePermission(uri)
                 val parsed = withContext(Dispatchers.IO) { FileRepository.read(context, uri) }
-                loadParsedIntoState(parsed)
+
+                // The file itself carries none of this - recover it from
+                // the library's own bookkeeping if we've opened this file
+                // before, otherwise make a sensible guess.
+                val existing = RecentFilesStore.load(context).find { it.uri == uri.toString() }
+                val (inferredDisplay, inferredSubtitle) = inferDisplayFields(parsed.switches)
+                val resolvedName = existing?.name ?: deriveNameFromUri(context, uri)
+                val resolvedDisplay = existing?.displayFieldId ?: inferredDisplay
+                val resolvedSubtitle = if (existing != null) existing.subtitleFieldId else inferredSubtitle
+
+                loadParsedIntoState(parsed, resolvedName, resolvedDisplay, resolvedSubtitle)
                 currentUri = uri
-                RecentFilesStore.touch(context, uri.toString(), parsed.name)
+                RecentFilesStore.touch(context, uri.toString(), resolvedName, resolvedDisplay, resolvedSubtitle)
                 refreshRecents()
                 onDone(true)
             } catch (e: Exception) {
@@ -99,11 +113,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 entries.clear()
                 currentUri = uri
                 withContext(Dispatchers.IO) {
-                    FileRepository.write(
-                        context, uri, bookName, switches.toList(), entries.toList(), displayFieldId, subtitleFieldId
-                    )
+                    FileRepository.write(context, uri, switches.toList(), entries.toList())
                 }
-                RecentFilesStore.touch(context, uri.toString(), name)
+                RecentFilesStore.touch(context, uri.toString(), name, displayFieldId, subtitleFieldId)
                 refreshRecents()
                 onDone(true)
             } catch (e: Exception) {
@@ -114,10 +126,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun loadParsedIntoState(parsed: ParsedBook) {
-        bookName = parsed.name
-        displayFieldId = parsed.displayFieldId
-        subtitleFieldId = parsed.subtitleFieldId
+    private fun loadParsedIntoState(
+        parsed: ParsedBook,
+        name: String,
+        displayField: String,
+        subtitleField: String?
+    ) {
+        bookName = name
+        displayFieldId = displayField
+        subtitleFieldId = subtitleField
         switches.clear()
         switches.addAll(parsed.switches)
         entries.clear()
@@ -228,10 +245,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         switches.removeAll { it.id == switchId }
         entries.forEach { it.values.remove(switchId) }
         if (displayFieldId == switchId) {
-            displayFieldId = switches.firstOrNull { it.type == SwitchType.TEXT }?.id ?: ""
+            displayFieldId = switches.firstOrNull {
+                it.type == SwitchType.TEXT || it.type == SwitchType.TAGS
+            }?.id ?: ""
         }
         if (subtitleFieldId == switchId) {
-            subtitleFieldId = switches.firstOrNull { it.type == SwitchType.TEXT && it.id != displayFieldId }?.id
+            subtitleFieldId = switches.firstOrNull {
+                (it.type == SwitchType.TEXT || it.type == SwitchType.TAGS) && it.id != displayFieldId
+            }?.id
         }
         scheduleSave()
     }
@@ -244,6 +265,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setSubtitleField(id: String?) {
         subtitleFieldId = id
         scheduleSave()
+    }
+
+    /** A sensible guess at title/subtitle fields for a file we have no
+     *  prior bookkeeping for: "comment"/"key" if present, otherwise the
+     *  first text-ish switches available. */
+    private fun inferDisplayFields(fromSwitches: List<SwitchDef>): Pair<String, String?> {
+        val textish = fromSwitches.filter { it.type == SwitchType.TEXT || it.type == SwitchType.TAGS }
+        val display = textish.firstOrNull { it.id == "comment" }?.id
+            ?: textish.firstOrNull()?.id
+            ?: fromSwitches.firstOrNull()?.id
+            ?: ""
+        val subtitle = textish.firstOrNull { it.id == "key" && it.id != display }?.id
+            ?: textish.firstOrNull { it.id != display }?.id
+        return display to subtitle
+    }
+
+    private fun deriveNameFromUri(context: Context, uri: Uri): String {
+        return FileRepository.displayName(context, uri).removeSuffix(".json")
     }
 
     private fun grantPersistablePermission(uri: Uri) {
@@ -275,8 +314,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Fire-and-forget autosave: snapshots current state on the calling
-     *  thread, then writes it off the main thread. Failures are surfaced
-     *  via [lastError] rather than crashing the editor. */
+     *  thread, syncs the library's bookkeeping (name, title/subtitle
+     *  fields - none of which live in the JSON file), then writes the
+     *  book off the main thread. Failures are surfaced via [lastError]
+     *  rather than crashing the editor. */
     fun persistNow() {
         val uri = currentUri ?: return
         val name = bookName
@@ -284,9 +325,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val en = entries.toList()
         val df = displayFieldId
         val sf = subtitleFieldId
+        RecentFilesStore.touch(getApplication(), uri.toString(), name, df, sf)
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                FileRepository.write(getApplication(), uri, name, sw, en, df, sf)
+                FileRepository.write(getApplication(), uri, sw, en)
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     lastError = "Couldn't save: ${describeError(e)}"
