@@ -33,13 +33,24 @@ data class ParsedBook(
 object LorebookSerializer {
 
     fun toJson(switches: List<SwitchDef>, entries: List<Entry>): String {
-        val typeById = switches.associate { it.id to it.type }
         val entriesObj = JSONObject()
         entries.forEachIndexed { index, entry ->
             val o = JSONObject()
+            // Written in switch order (not the underlying map's own
+            // iteration order, which isn't guaranteed to match) so that
+            // reordering switches in Manage Switches is also what reorders
+            // the fields in the file.
+            switches.forEach { sw ->
+                if (entry.values.containsKey(sw.id)) {
+                    putValue(o, sw.id, entry.values[sw.id], sw.type)
+                }
+            }
+            // A field on the entry that isn't in the current switch
+            // registry shouldn't normally happen, but is still written out
+            // (after the known ones) rather than silently dropped.
             entry.values.forEach { (k, v) ->
-                if (k !in AUTO_MANAGED_FIELD_IDS) {
-                    putValue(o, k, v, typeById[k])
+                if (k !in AUTO_MANAGED_FIELD_IDS && switches.none { it.id == k }) {
+                    putValue(o, k, v, null)
                 }
             }
             // The app keeps these in lockstep with the entry's position,

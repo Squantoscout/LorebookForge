@@ -222,6 +222,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return unique
     }
 
+    /** Moves a switch from one position in the registry to another. Switch
+     *  order is also field order in the file, so this is both a display
+     *  preference and, on the next save, the order the JSON is written in. */
+    fun moveSwitch(from: Int, to: Int) {
+        if (from == to || from !in switches.indices || to !in switches.indices) return
+        val item = switches.removeAt(from)
+        switches.add(to, item)
+        scheduleSave()
+    }
+
     fun renameSwitch(switchId: String, newLabel: String) {
         val idx = switches.indexOfFirst { it.id == switchId }
         if (idx == -1) return
